@@ -1,7 +1,7 @@
 import sqlite3
 
 
-def get(table, task="", inftype="*", sqlcities=sqlite3.connect("data/cities_db.sqlite")):
+def get(table, task="", inftype="*", sqlcities=sqlite3.connect("cities_db.sqlite")):
     crs = sqlcities.cursor()
     print(f"""SELECT {inftype} FROM {table} WHERE {task}""")
     ans = [list(i) for i in crs.execute(f"""SELECT {inftype} FROM {table}{" WHERE " * (task != "") + task}""")]
