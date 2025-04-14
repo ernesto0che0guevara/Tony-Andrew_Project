@@ -1,5 +1,9 @@
 import logging
+import random
+
 from telegram.ext import Application, MessageHandler, filters, ConversationHandler, CommandHandler
+
+import db_funcs
 from config import TOKEN as BOT_TOKEN
 import asyncio
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -72,8 +76,21 @@ async def leaderboards_command(update, context):
 
 
 async def new_game_command(update, context):
-    pass
+    cities = db_funcs.get_all_cities()
+    first_city_id = random.choice(cities)
+    context.user_data['session'] = {
+        'cache': [str(first_city_id)]
+    }
+    print(context.user_data)
+    user_id = update.message.from_user.id
+    db_funcs.create_new_session(user_id, first_city_id)
+    chosen_city = db_funcs.get_city_by_id(context.user_data['session']['cache'][-1])
+    await update.message.reply_text(
+        rf"Ну хорошо, тогда я начинаю - {chosen_city}")
 
+
+async def handle_session(update, context):
+    pass
 
 async def rools_message(update, context):
     update.message.reply_text("""Правила игры:
