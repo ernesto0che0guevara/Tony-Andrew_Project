@@ -10,10 +10,37 @@ import requests
 from io import BytesIO
 from PIL import Image
 
-
 # ================================================================
 # classes
 # ================================================================
+
+rep = {
+    "Республика Адыгея ": ("Майкоп"),
+    "Республика Алтай ": ("Горно-Алтайск"),
+    "Республика Башкортостан ": ("Уфа"),
+    "Республика Бурятия ": ("Улан-Удэ"),
+    "Республика Дагестан ": ("Махачкала"),
+    "Республика Ингушетия ": ("Магас"),
+    "Кабардино-Балкарская Республика ": ("Нальчик"),
+    "Республика Калмыкия ": ("Элиста"),
+    "Карачаево-Черкесская Республика ": ("Черкесск"),
+    "Республика Карелия ": ("Петрозаводск"),
+    "Республика Коми ": ("Сыктывкар"),
+    "Республика Марий Эл ": ("Йошкар-Ола"),
+    "Республика Мордовия ": ("Саранск"),
+    "Республика Саха ": ("Якутия", "Якутск"),
+    "Республика Северная Осетия-Алания ": ("Владикавказ"),
+    "Республика Татарстан ": ("Казань"),
+    "Республика Тыва ": ("Кызыл"),
+    "Удмуртская Республика ": ("Ижевск"),
+    "Республика Хакасия ": ("Абакан"),
+    "Чеченская Республика ": ("Грозный"),
+    "Чувашская Республика ": ("Чебоксары")}
+
+
+
+
+
 class City:
     forbidden_letters = "ЫЬЪЁ".lower()
     lvl1_letters = "КНГШЗХВАПРОЛДЖССМИТБ".lower()
@@ -116,6 +143,7 @@ class Country:
     def getcs(self):
         return [i.getcs() for i in self.getrs()]
 
+
 # ================================================================
 # db_funcs
 # ================================================================
@@ -140,7 +168,7 @@ def insert_into(table, keys, values, sqlcities=sqlite3.connect("data/cities_db.s
 
 
 def check(s, type="name", table="cities"):
-    a = get(table, f"{type} = '{s}'")
+    a = get(table, f"{type} = '{s.capitalize()}'")
     print(a)
     return a != []
 
@@ -162,6 +190,7 @@ def city_handler(cityname, used):
     city2 = City(rchoice(vars))
     return str(city2)
 
+
 # ================================================================
 
 # ================================================================
@@ -176,7 +205,7 @@ sessions = {}
 
 class Session:
     def __init__(self, id, uname):
-        self.id  = id
+        self.id = id
         self.name = uname
         self.game = []
         self.in_game = False
@@ -254,10 +283,11 @@ async def message_processor(update, context):
                 if sess.game and City(sess.game[-1]) != s:
                     await update.message.reply_text("Город начинается с неправильной буквы")
                 elif not check(s):
+                    get_city(s)
                     await update.message.reply_text("Я не знаю такого города")
                 elif s in sess.game:
                     await update.message.reply_text("Такой город уже был")
-                #raise Exception()
+                # raise Exception()
         except Exception as e:
             print(f"{e}")
             await error_message(update, context)
@@ -311,6 +341,20 @@ async def city_info(update, context, city_name, is_hint=False):
             await context.bot.send_photo(chat_id=chat_id, photo='data/map.jpg')
         except Exception:
             print("Карта не найдена")
+
+
+# /response/GeoObjectCollection/featureMember/0/GeoObject/name
+
+def get_city(geocode):
+    server_address = 'http://geocode-maps.yandex.ru/1.x/?'
+    api_key = '8013b162-6b42-4997-9691-77b7074026e0'
+    geocoder_request = f'{server_address}apikey={api_key}&geocode={geocode}&format=json'
+    response = requests.get(geocoder_request).json()
+    if response:
+        print(response)
+
+
+get_city('муниципальный район Сыктывдинский')
 
 
 def save_map(city_name):
