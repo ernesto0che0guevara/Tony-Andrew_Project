@@ -1,10 +1,14 @@
+import json
 import logging
+import aiohttp
+import aiosqlite
 from telegram.ext import Application, MessageHandler, filters, ConversationHandler, CommandHandler
+
+
 from config import TOKEN as BOT_TOKEN
 import asyncio
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from random import randint as rint
-
 import wikipedia
 import requests
 from io import BytesIO
@@ -14,31 +18,31 @@ from PIL import Image
 # classes
 # ================================================================
 
-rep = {
-    "Республика Адыгея ": ("Майкоп"),
-    "Республика Алтай ": ("Горно-Алтайск"),
-    "Республика Башкортостан ": ("Уфа"),
-    "Республика Бурятия ": ("Улан-Удэ"),
-    "Республика Дагестан ": ("Махачкала"),
-    "Республика Ингушетия ": ("Магас"),
-    "Кабардино-Балкарская Республика ": ("Нальчик"),
-    "Республика Калмыкия ": ("Элиста"),
-    "Карачаево-Черкесская Республика ": ("Черкесск"),
-    "Республика Карелия ": ("Петрозаводск"),
-    "Республика Коми ": ("Сыктывкар"),
-    "Республика Марий Эл ": ("Йошкар-Ола"),
-    "Республика Мордовия ": ("Саранск"),
-    "Республика Саха ": ("Якутия", "Якутск"),
-    "Республика Северная Осетия-Алания ": ("Владикавказ"),
-    "Республика Татарстан ": ("Казань"),
-    "Республика Тыва ": ("Кызыл"),
-    "Удмуртская Республика ": ("Ижевск"),
-    "Республика Хакасия ": ("Абакан"),
-    "Чеченская Республика ": ("Грозный"),
-    "Чувашская Республика ": ("Чебоксары")}
 
 
+async def create_db_pool(path):
+    return await aiosqlite.connect(path)
 
+db_pool = asyncio.run(create_db_pool("data/cities_db.sqlite"))
+
+
+async def get(table, task="", inftype="*", sqlcities=db_pool):
+    async with db_pool.execute(f"""SELECT {inftype} FROM {table}{" WHERE " * (task != "") + task}""") as cur:
+        ans = await cur.fetchall()
+    print(f"""SELECT {inftype} FROM {table} WHERE {task}""")
+    print(ans)
+    return ans
+
+
+async def insert_into(table, keys, values, sqlcities=db_pool):
+    async with db_pool.execute(f"""INSERT INTO {table}({keys}) VALUES({", ".join(map(str, values))})""") as cur:
+        print(cur)
+        await cur.commit()
+
+
+async def check(s, type="name", table="cities"):
+    a = await get(table, f"{type} = '{s}'")
+    return a[0] != []
 
 
 class City:
@@ -47,38 +51,41 @@ class City:
     lvl2_letters = "ЧФЕУЯ".lower() + lvl1_letters
     lvl3_letters = "ЩЙЦЭЮ".lower() + lvl2_letters
 
-    def __init__(self, name):
-        inf = get("cities", f"name = '{name}'", "city_id, region_id, country_id")[0]
+    async def init(self, name):
+        inf = await get("cities", f"name = '{name}'", "city_id, region_id, country_id")
+        inf = inf[0]
         self.id = int(inf[0])
         self.name = name
         self.rid = int(inf[1])
-        self.rname = get("regions", f"region_id = {self.rid}", "name")[0][0]
+        self.rname = await get("regions", f"region_id = {self.rid}", "name")
+        self.rname = self.rname[0][0]
         self.cid = int(inf[2])
-        self.cname = get("countries", f"country_id = {self.cid}", "name")[0][0]
+        self.cname = await get("countries", f"country_id = {self.cid}", "name")
+        self.cname = self.cname[0][0]
         self.ll = ""
-        self.findll()
+        await self.findll()
 
-    def getr(self):
+    async def getr(self):
         return Region(self.rname)
 
-    def getC(self):
+    async def getC(self):
         return self.getr().getC()
 
-    def findll(self):
+    async def findll(self):
         s = self.name.lower()
         i = -1
         while s[i] in self.forbidden_letters and s[i].isalpha():
             i -= 1
         self.ll = s[i]
 
-    def getca(self, used):
-        arr = [i[0] for i in get("cities", f"name LIKE '{self.ll.upper()}%'", "name") if i[0] not in used]
+    async def getca(self, used):
+        arr = [i[0] for i in await get("cities", f"name LIKE '{self.ll.upper()}%'", "name") if i[0] not in used]
         return arr
 
     def __str__(self):
         return self.name
 
-    def findmc(self):
+    async def findmc(self):
         search_api_server = "https://search-maps.yandex.ru/v1/"
         api_key = "dda3ddba-c9ea-4ead-9010-f43fbc15c6e3"
         search_params = {
@@ -117,31 +124,32 @@ class City:
 
 
 class Region:
-    def __init__(self, name):
-        inf = get("regions", f"name = '{name}'", "region_id, country_id")[0]
+    async def init(self, name):
+        inf = await get("regions", f"name = '{name}'", "region_id, country_id")[0]
         self.id = int(inf[0])
         self.name = name
         self.cid = int(inf[1])
-        self.cname = get("countries", f"country_id = {self.cid}", "name")[0][0]
+        self.cname = await get("countries", f"country_id = {self.cid}", "name")[0][0]
 
-    def getcs(self):
-        return [City(i[0]) for i in get("cities", "name", f"region_id = {self.id}")]
+    async def getcs(self):
+        return [City().init(i[0]) for i in await get("cities", "name", f"region_id = {self.id}")]
 
     def getC(self):
-        return Country(self.cname)
+        return Country().init(self.cname)
 
 
 class Country:
-    def __init__(self, name):
-        inf = get("countries", f"name = '{name}'", "country_id")[0]
+    async def init(self, name):
+        inf = await get("countries", f"name = '{name}'", "country_id")
+        inf = inf[0]
         self.id = int(inf[0])
         self.name = name
 
-    def getrs(self):
-        return [Region(i[0]) for i in get("regions", "name", f"country_id = {self.id}")]
+    async def getrs(self):
+        return [Region().init(i[0]) for i in await get("regions", "name", f"country_id = {self.id}")]
 
-    def getcs(self):
-        return [i.getcs() for i in self.getrs()]
+    async def getcs(self):
+        return [await i.getcs() for i in self.getrs()]
 
 
 # ================================================================
@@ -150,27 +158,27 @@ class Country:
 import sqlite3
 
 
-def get(table, task="", inftype="*", sqlcities=sqlite3.connect("data/cities_db.sqlite")):
-    crs = sqlcities.cursor()
-    executor = f"""SELECT {inftype} FROM {table}{" WHERE " * (task != "") + task}"""
-    print(executor)
-    ans = [tuple(i) for i in crs.execute(executor)]
-    print(ans)
-    return ans
-
-
-def insert_into(table, keys, values, sqlcities=sqlite3.connect("data/cities_db.sqlite")):
-    crs = sqlcities.cursor()
-    executor = f"""INSERT INTO {table}({keys}) VALUES({", ".join(map(str, values))})"""
-    print(executor)
-    crs.execute(executor)
-    sqlcities.commit()
-
-
-def check(s, type="name", table="cities"):
-    a = get(table, f"{type} = '{s.capitalize()}'")
-    print(a)
-    return a != []
+# def get(table, task="", inftype="*", sqlcities=sqlite3.connect("data/cities_db.sqlite")):
+#     crs = sqlcities.cursor()
+#     executor = f"""SELECT {inftype} FROM {table}{" WHERE " * (task != "") + task}"""
+#     print(executor)
+#     ans = [tuple(i) for i in crs.execute(executor)]
+#     print(ans)
+#     return ans
+#
+#
+# def insert_into(table, keys, values, sqlcities=sqlite3.connect("data/cities_db.sqlite")):
+#     crs = sqlcities.cursor()
+#     executor = f"""INSERT INTO {table}({keys}) VALUES({", ".join(map(str, values))})"""
+#     print(executor)
+#     crs.execute(executor)
+#     sqlcities.commit()
+#
+#
+# def check(s, type="name", table="cities"):
+#     a = get(table, f"{type} = ('{s.capitalize()}')")
+#     print(a)
+#     return a != []
 
 
 # get("cities", "name = 'Москва'", "city_id")
@@ -181,14 +189,19 @@ def check(s, type="name", table="cities"):
 from random import choice as rchoice
 
 
-def city_handler(cityname, used):
-    if not check(cityname, "name", "cities"):
+async def city_handler(cityname, used):
+    flag = await check(cityname, "name", "cities")
+    if not flag:
         print(11)
         raise Exception
-    city1 = City(cityname)
-    vars = city1.getca(used)
-    city2 = City(rchoice(vars))
+    city1 = City()
+    await city1.init(cityname)
+    vars = await city1.getca(used)
+    city2 = City()
+    await city2.init(rchoice(vars))
     return str(city2)
+
+
 
 
 # ================================================================
@@ -201,23 +214,24 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 sessions = {}
-
+with open('provinces.json', 'r', encoding='utf8') as file:
+    provinces = json.load(file)
 
 class Session:
-    def __init__(self, id, uname):
+    async def init(self, id, uname):
         self.id = id
         self.name = uname
         self.game = []
         self.in_game = False
 
-    def new_game(self):
+    async def new_game(self):
         self.game = []
         self.in_game = True
 
-    def stop_game(self):
+    async def stop_game(self):
         self.in_game = False
 
-    def continue_game(self):
+    async def continue_game(self):
         self.in_game = True
 
 
@@ -244,7 +258,8 @@ def main():
 async def start(update, context):
     """Отправляет сообщение когда получена команда /start"""
     user = update.effective_user
-    sessions[update.message.chat_id] = Session(update.message.chat_id, user)
+    sessions[update.message.chat_id] = Session()
+    await sessions[update.message.chat_id].init(update.message.chat_id, user)
     button1 = KeyboardButton(text='/play')
     # button2 = KeyboardButton(text='/leaderboards')
     reply_keyboard = [[button1]]
@@ -266,31 +281,33 @@ async def message_processor(update, context):
 
     if sessions[chat_id].in_game:
         sess = sessions[chat_id]
-        s = update.message.text
+        s = await get_locality_name(update.message.text)
+        print(s)
 
-        try:
-            # await update.message.reply_text("\U00002705")
-            if (not sess.game or City(sess.game[-1]) == s) and check(s) and s not in sess.game:
-                sess.game.append(s)
-                res = city_handler(s, sess.game)
-                await city_info(update, context, f"{s}")
-                print(res)
-                sess.game.append(res)
-                print(sess.game)
-                await update.message.reply_text(f"Мой ход: {res}")
-                await city_info(update, context, f"{res}")
-            else:
-                if sess.game and City(sess.game[-1]) != s:
-                    await update.message.reply_text("Город начинается с неправильной буквы")
-                elif not check(s):
-                    get_city(s)
+        # await update.message.reply_text("\U00002705")
+        if (not sess.game or await City().init(sess.game[-1]) == s) and await check(s) and s not in sess.game:
+            sess.game.append(s)
+            res = await city_handler(s, sess.game)
+            await city_info(update, context, f"{s}")
+            print(res)
+            sess.game.append(res)
+            print(sess.game)
+            await update.message.reply_text(f"Мой ход: {res}")
+            await city_info(update, context, f"{res}")
+        else:
+            if sess.game and await City().init(sess.game[-1]) != s:
+                await update.message.reply_text("Город начинается с неправильной буквы")
+            elif not await check(s):
+                s = await get_province_name(s)
+                s = provinces[s]
+                if not await check(s):
                     await update.message.reply_text("Я не знаю такого города")
-                elif s in sess.game:
-                    await update.message.reply_text("Такой город уже был")
-                # raise Exception()
-        except Exception as e:
-            print(f"{e}")
-            await error_message(update, context)
+                else:
+                    await update.message.reply_text(f"Я не знаю такого города. Возможно вы имели ввиду {s}?")
+            if s in sess.game:
+                await update.message.reply_text("Такой город уже был")
+            # raise Exception()
+
     else:
         # await error_message(update, context)
         await update.message.reply_text("Выберите команду из меню!")
@@ -305,7 +322,8 @@ async def city_info(update, context, city_name, is_hint=False):
     try:
         wikipedia.set_lang("ru")
         city_images = wikipedia.page(f"Город {city_name} достопримечательность").images
-    except Exception:
+    except Exception as ex:
+        print(ex)
         print(f"{city_name}: фото в википедии не найдено")
         if is_hint:
             await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
@@ -337,27 +355,37 @@ async def city_info(update, context, city_name, is_hint=False):
 
     if not is_hint:
         try:
-            save_map(city_name)
+            await save_map(city_name)
             await context.bot.send_photo(chat_id=chat_id, photo='data/map.jpg')
         except Exception:
             print("Карта не найдена")
 
 
-# /response/GeoObjectCollection/featureMember/0/GeoObject/name
 
-def get_city(geocode):
+async def get_locality_name(geocode):
     server_address = 'http://geocode-maps.yandex.ru/1.x/?'
     api_key = '8013b162-6b42-4997-9691-77b7074026e0'
     geocoder_request = f'{server_address}apikey={api_key}&geocode={geocode}&format=json'
     response = requests.get(geocoder_request).json()
     if response:
-        print(response)
+        print(response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name'])
+        return response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name']
 
 
-get_city('муниципальный район Сыктывдинский')
+async def get_province_name(geocode):
+    server_address = 'http://geocode-maps.yandex.ru/1.x/?'
+    api_key = '8013b162-6b42-4997-9691-77b7074026e0'
+    geocoder_request = f'{server_address}apikey={api_key}&geocode={geocode}&format=json'
+    async with aiohttp.ClientSession() as session:
+        async with session.get(geocoder_request) as response:
+            response = await response.json()
+            if response:
+                return response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty'][
+                    'GeocoderMetaData']['Address']['Components'][-3]['name']
 
 
-def save_map(city_name):
+
+async def save_map(city_name):
     search_api_server = "https://search-maps.yandex.ru/v1/"
     api_key = "dda3ddba-c9ea-4ead-9010-f43fbc15c6e3"
     search_params = {
@@ -366,8 +394,9 @@ def save_map(city_name):
         "lang": "ru_RU",
         "type": "geo"
     }
-    response = requests.get(search_api_server, params=search_params)
-    json_response = response.json()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(search_api_server) as response:
+            json_response = await response.json()
     # print(json_response)
     city = json_response["features"][0]
 
@@ -420,7 +449,7 @@ async def leaderboards_command(update, context):
 async def new_game_command(update, context):
     chat_id = update.message.chat_id
     u = sessions[chat_id]
-    u.new_game()
+    await u.new_game()
     user = update.effective_user
     reply_keyboard = [['/stop'], ['/hint'], ['/restart']
                       ]
@@ -485,4 +514,8 @@ async def rools_message(update, context):
     """)
 
 
-main()
+
+if __name__ == '__main__':
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    main()
