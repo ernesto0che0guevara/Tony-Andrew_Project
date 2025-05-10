@@ -1,8 +1,11 @@
 import json
 import logging
+import time
+
 import aiohttp
 import aiosqlite
-from telegram.ext import Application, MessageHandler, filters, ConversationHandler, CommandHandler
+from bs4 import BeautifulSoup
+from telegram.ext import Application, MessageHandler, filters, ConversationHandler, CommandHandler, Job
 
 
 from config import TOKEN as BOT_TOKEN
@@ -14,12 +17,12 @@ import requests
 from io import BytesIO
 from PIL import Image
 
+
+
+
 # ================================================================
-# classes
+# db_funcs
 # ================================================================
-
-
-
 async def create_db_pool(path):
     return await aiosqlite.connect(path)
 
@@ -29,22 +32,27 @@ db_pool = asyncio.run(create_db_pool("data/cities_db.sqlite"))
 async def get(table, task="", inftype="*", sqlcities=db_pool):
     async with db_pool.execute(f"""SELECT {inftype} FROM {table}{" WHERE " * (task != "") + task}""") as cur:
         ans = await cur.fetchall()
-    print(f"""SELECT {inftype} FROM {table} WHERE {task}""")
-    print(ans)
+    # print(ans)
+    # print(f"""SELECT {inftype} FROM {table} WHERE {task}""")
+    # print(ans)
     return ans
 
 
 async def insert_into(table, keys, values, sqlcities=db_pool):
     async with db_pool.execute(f"""INSERT INTO {table}({keys}) VALUES({", ".join(map(str, values))})""") as cur:
-        print(cur)
+        # print(cur)
         await cur.commit()
 
 
 async def check(s, type="name", table="cities"):
     a = await get(table, f"{type} = '{s}'")
+    if a == []:
+        return False
     return a[0] != []
 
-
+# ================================================================
+# classes
+# ================================================================
 class City:
     forbidden_letters = "ЫЬЪЁ".lower()
     lvl1_letters = "КНГШЗХВАПРОЛДЖССМИТБ".lower()
@@ -62,8 +70,12 @@ class City:
         self.cid = int(inf[2])
         self.cname = await get("countries", f"country_id = {self.cid}", "name")
         self.cname = self.cname[0][0]
-        self.ll = ""
-        await self.findll()
+        s = self.name.lower()
+        i = -1
+        while s[i] in self.forbidden_letters and s[i].isalpha():
+            i -= 1
+        self.ll = s[i]
+
 
     async def getr(self):
         return Region(self.rname)
@@ -71,12 +83,7 @@ class City:
     async def getC(self):
         return self.getr().getC()
 
-    async def findll(self):
-        s = self.name.lower()
-        i = -1
-        while s[i] in self.forbidden_letters and s[i].isalpha():
-            i -= 1
-        self.ll = s[i]
+
 
     async def getca(self, used):
         arr = [i[0] for i in await get("cities", f"name LIKE '{self.ll.upper()}%'", "name") if i[0] not in used]
@@ -96,7 +103,7 @@ class City:
         }
         response = requests.get(search_api_server, params=search_params)
         json_response = response.json()
-        print(json_response)
+        # print(json_response)
         city = json_response["features"][0]
 
         point = city["geometry"]["coordinates"]
@@ -120,7 +127,7 @@ class City:
         pass
 
     def __eq__(self, city2):
-        return self.ll == city2[0].lower()
+        return self.ll.lower() == city2[0].lower()
 
 
 class Region:
@@ -152,36 +159,8 @@ class Country:
         return [await i.getcs() for i in self.getrs()]
 
 
-# ================================================================
-# db_funcs
-# ================================================================
-import sqlite3
 
 
-# def get(table, task="", inftype="*", sqlcities=sqlite3.connect("data/cities_db.sqlite")):
-#     crs = sqlcities.cursor()
-#     executor = f"""SELECT {inftype} FROM {table}{" WHERE " * (task != "") + task}"""
-#     print(executor)
-#     ans = [tuple(i) for i in crs.execute(executor)]
-#     print(ans)
-#     return ans
-#
-#
-# def insert_into(table, keys, values, sqlcities=sqlite3.connect("data/cities_db.sqlite")):
-#     crs = sqlcities.cursor()
-#     executor = f"""INSERT INTO {table}({keys}) VALUES({", ".join(map(str, values))})"""
-#     print(executor)
-#     crs.execute(executor)
-#     sqlcities.commit()
-#
-#
-# def check(s, type="name", table="cities"):
-#     a = get(table, f"{type} = ('{s.capitalize()}')")
-#     print(a)
-#     return a != []
-
-
-# get("cities", "name = 'Москва'", "city_id")
 
 # ================================================================
 # game_funcs
@@ -192,7 +171,7 @@ from random import choice as rchoice
 async def city_handler(cityname, used):
     flag = await check(cityname, "name", "cities")
     if not flag:
-        print(11)
+        # print(11)
         raise Exception
     city1 = City()
     await city1.init(cityname)
@@ -223,6 +202,7 @@ class Session:
         self.name = uname
         self.game = []
         self.in_game = False
+        self.timer = 10
 
     async def new_game(self):
         self.game = []
@@ -234,10 +214,13 @@ class Session:
     async def continue_game(self):
         self.in_game = True
 
+    async def update(self):
+        self.timer = 10
+
 
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-    print('Starting Cities_Game chatbot')
+    application = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("new_game", new_game_command))
@@ -251,8 +234,34 @@ def main():
 
     text_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, message_processor)
     application.add_handler(text_handler)
-
+    print('Starting Cities_Game chatbot')
+    # application.create_task(check_timers(application))
     application.run_polling()
+    # await application.create_task(check_timers(application))
+
+
+def stop_timer(context, name):
+    global timer_range
+    timer_range = 20
+    timer = context.job_queue.get_jobs_by_name(str(name))
+    print(timer)
+    for i in timer:
+        i.schedule_removal()
+
+
+async def start_timer(context):
+    global timer_range
+    timer_range -= 1
+    sess = context.job.data['session']
+    await context.bot.send_message(context.job.chat_id, text=timer_range)
+
+    reply_keyboard = [[f"/restart"], ['/main_menu']]
+    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
+    if timer_range == 0:
+        await context.bot.send_message(context.job.chat_id, text='ТЫ ПРОИГРАЛ', reply_markup=markup)
+        sessions[context.job.chat_id].in_game = False
+        async with db_pool.execute(f'UPDATE users SET record = {len(sess)} WHERE id = {context.job.chat_id}') as cur:
+            await db_pool.commit()
 
 
 async def start(update, context):
@@ -260,6 +269,7 @@ async def start(update, context):
     user = update.effective_user
     sessions[update.message.chat_id] = Session()
     await sessions[update.message.chat_id].init(update.message.chat_id, user)
+    is_logged_in = await check_user_if_logged_in(update.message.chat_id)
     button1 = KeyboardButton(text='/play')
     # button2 = KeyboardButton(text='/leaderboards')
     reply_keyboard = [[button1]]
@@ -275,37 +285,57 @@ async def back(update, context):
         reply_markup=ReplyKeyboardRemove()
     )
 
+timer_range = 20
 
 async def message_processor(update, context):
     chat_id = update.message.chat_id
-
     if sessions[chat_id].in_game:
         sess = sessions[chat_id]
-        s = await get_locality_name(update.message.text)
+        s = update.message.text
+        # print(s)
+        print(f'sess.game - {sess.game}')
         print(s)
-
         # await update.message.reply_text("\U00002705")
+
+        # print(f'Ход - {sess.game}')
         if (not sess.game or await City().init(sess.game[-1]) == s) and await check(s) and s not in sess.game:
+            stop_timer(context, str(chat_id))
             sess.game.append(s)
             res = await city_handler(s, sess.game)
             await city_info(update, context, f"{s}")
-            print(res)
+            # print(res)
             sess.game.append(res)
-            print(sess.game)
+            # print(sess.game)
             await update.message.reply_text(f"Мой ход: {res}")
             await city_info(update, context, f"{res}")
+            context.job_queue.run_repeating(start_timer, interval=1.0, first=0.0, data=({'session': sess.game}), chat_id=chat_id, name=str(chat_id))
+
         else:
-            if sess.game and await City().init(sess.game[-1]) != s:
+            city = City()
+            await city.init(sess.game[-1])
+            print(city, f'Последняя буква {city.ll}')
+            if sess.game and city != s:
                 await update.message.reply_text("Город начинается с неправильной буквы")
             elif not await check(s):
-                s = await get_province_name(s)
-                s = provinces[s]
+                # s = await get_province_name(s)
+                # s = provinces[s]
                 if not await check(s):
                     await update.message.reply_text("Я не знаю такого города")
                 else:
                     await update.message.reply_text(f"Я не знаю такого города. Возможно вы имели ввиду {s}?")
-            if s in sess.game:
+            elif s in sess.game:
                 await update.message.reply_text("Такой город уже был")
+            else:
+                stop_timer(context, str(chat_id))
+                sess.game.append(s)
+                res = await city_handler(s, sess.game)
+                await city_info(update, context, f"{s}")
+                # print(res)
+                sess.game.append(res)
+                # print(sess.game)
+                await update.message.reply_text(f"Мой ход: {res}")
+                await city_info(update, context, f"{res}")
+                context.job_queue.run_repeating(start_timer, interval=1.0, first=0.0, data=({'session': sess.game}), chat_id=chat_id, name=str(chat_id))
             # raise Exception()
 
     else:
@@ -315,50 +345,57 @@ async def message_processor(update, context):
 
 
 async def city_info(update, context, city_name, is_hint=False):
-    print(f"Информация о городе {city_name}:")
-    chat_id = update.message.chat_id
-
-    city_images = []
-    try:
-        wikipedia.set_lang("ru")
-        city_images = wikipedia.page(f"Город {city_name} достопримечательность").images
-    except Exception as ex:
-        print(ex)
-        print(f"{city_name}: фото в википедии не найдено")
-        if is_hint:
-            await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
-
-    if city_images:
-        city_image = city_images[0]
-
-        print(city_image)
-        try:
-            await context.bot.send_photo(chat_id=chat_id, photo=city_image)
-
-            if is_hint:
-                await update.message.reply_text("Попробуйте угадать это место!")
-            else:
-                await update.message.reply_text("Интересное о городе!")
-        except Exception as e:
-            print(f"{city_name}: фото не передано: {e}")
-            if is_hint:
-                await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
-
-    if not is_hint:
-        try:
-            wikitext = wikipedia.summary(f"{city_name} Город", sentences=4)
-            print(wikitext)
-            await update.message.reply_text("Возможно, вы не знали:")
-            await update.message.reply_text(wikitext)
-        except Exception:
-            print(f"{city_name}: информация в википедии не найдена")
-
-    if not is_hint:
-        try:
-            await save_map(city_name)
-            await context.bot.send_photo(chat_id=chat_id, photo='data/map.jpg')
-        except Exception:
-            print("Карта не найдена")
+    print(city_name)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'https://ru.wikipedia.org/wiki/Город {city_name}') as response:
+            print(response.status)
+            soup = BeautifulSoup(await response.text(), 'lxml')
+            main_text = soup.find('p').text.strip()
+    await update.message.reply_text(main_text)
+    # print(f"Информация о городе {city_name}:")
+    # chat_id = update.message.chat_id
+    #
+    # city_images = []
+    # try:
+    #     wikipedia.set_lang("ru")
+    #     city_images = wikipedia.page(f"Город {city_name} достопримечательность").images
+    # except Exception as ex:
+    #     print(ex)
+    #     print(f"{city_name}: фото в википедии не найдено")
+    #     if is_hint:
+    #         await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
+    #
+    # if city_images:
+    #     city_image = city_images[0]
+    #
+    #     print(city_image)
+    #     try:
+    #         await context.bot.send_photo(chat_id=chat_id, photo=city_image)
+    #
+    #         if is_hint:
+    #             await update.message.reply_text("Попробуйте угадать это место!")
+    #         else:
+    #             await update.message.reply_text("Интересное о городе!")
+    #     except Exception as e:
+    #         print(f"{city_name}: фото не передано: {e}")
+    #         if is_hint:
+    #             await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
+    #
+    # if not is_hint:
+    #     try:
+    #         wikitext = wikipedia.summary(f"{city_name} Город", sentences=4)
+    #         print(wikitext)
+    #         await update.message.reply_text("Возможно, вы не знали:")
+    #         await update.message.reply_text(wikitext)
+    #     except Exception:
+    #         print(f"{city_name}: информация в википедии не найдена")
+    #
+    # if not is_hint:
+    #     try:
+    #         await save_map(city_name)
+    #         await context.bot.send_photo(chat_id=chat_id, photo='data/map.jpg')
+    #     except Exception:
+    #         print("Карта не найдена")
 
 
 
@@ -368,7 +405,7 @@ async def get_locality_name(geocode):
     geocoder_request = f'{server_address}apikey={api_key}&geocode={geocode}&format=json'
     response = requests.get(geocoder_request).json()
     if response:
-        print(response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name'])
+        # print(response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name'])
         return response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name']
 
 
@@ -424,10 +461,6 @@ async def error_message(update, context):
     await update.message.reply_text("Произошла ошибка:( Мы уже пытаемся её устранить")
 
 
-async def timer_func(async_func, delay):
-    await asyncio.sleep(delay)
-    await async_func()
-
 
 async def play(update, context):
     chat_id = update.message.chat_id
@@ -465,7 +498,7 @@ async def continue_game_command(update, context):
         u.continue_game()
         await update.message.reply_text("Загружаю города...")
     else:
-        u.new_game()
+        await u.new_game()
         await update.message.reply_text("Нет игры для продолжения...")
 
     repl = "\n".join(u.game)
@@ -485,7 +518,7 @@ async def hint_command(update, context):
     sess = sessions[chat_id]
     if sess.game:
         last_city = sess.game[-1]
-        print(last_city)
+        # print(last_city)
         try:
             res = city_handler(sess.game[-1], sess.game)
             await city_info(update, context, f"{res}", True)
@@ -513,9 +546,20 @@ async def rools_message(update, context):
     ...
     """)
 
+async def check_user_if_logged_in(user_id):
+    user = await get('users', f'id = {user_id}')
+    if user != []:
+        return True
+    else:
+        async with db_pool.execute(f"""INSERT INTO users VALUES({user_id}, 'offline')"""):
+            await db_pool.commit()
+        return False
 
 
 if __name__ == '__main__':
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     main()
+
+
+
