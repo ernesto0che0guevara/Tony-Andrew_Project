@@ -1,11 +1,9 @@
 import json
+from bs4 import BeautifulSoup
 import logging
-import time
-
 import aiohttp
 import aiosqlite
-from bs4 import BeautifulSoup
-from telegram.ext import Application, MessageHandler, filters, ConversationHandler, CommandHandler, Job
+from telegram.ext import Application, MessageHandler, filters, ConversationHandler, CommandHandler
 
 
 from config import TOKEN as BOT_TOKEN
@@ -17,42 +15,54 @@ import requests
 from io import BytesIO
 from PIL import Image
 
-
-
-
 # ================================================================
-# db_funcs
+# classes
 # ================================================================
+
+
 async def create_db_pool(path):
     return await aiosqlite.connect(path)
+
 
 db_pool = asyncio.run(create_db_pool("data/cities_db.sqlite"))
 
 
 async def get(table, task="", inftype="*", sqlcities=db_pool):
     async with db_pool.execute(f"""SELECT {inftype} FROM {table}{" WHERE " * (task != "") + task}""") as cur:
-        ans = await cur.fetchall()
-    # print(ans)
-    # print(f"""SELECT {inftype} FROM {table} WHERE {task}""")
-    # print(ans)
+        ans = [list(i) for i in await cur.fetchall()]
+    print(f"""SELECT {inftype} FROM {table} WHERE {task}""")
+    print(ans)
     return ans
 
 
+async def set(table, task, inftypes, values, type="str" , sqlcities=db_pool):
+    if type == "str":
+        executor = f"""UPDATE {table}\nSET {", ".join([inftypes[i] + " = " + f"'{values[i]}'" for i in range(len(inftypes))])}\nWHERE {task}"""
+    else:
+        executor = f"""UPDATE {table}\nSET {", ".join([inftypes[i] + " = " + f"{values[i]}" for i in range(len(inftypes))])}\nWHERE {task}"""
+    print(executor)
+    async with db_pool.execute(executor) as cur:
+        await db_pool.commit()
+
+
 async def insert_into(table, keys, values, sqlcities=db_pool):
-    async with db_pool.execute(f"""INSERT INTO {table}({keys}) VALUES({", ".join(map(str, values))})""") as cur:
-        # print(cur)
-        await cur.commit()
+    executor = f"""INSERT INTO {table} ({keys}) VALUES ({values})"""
+    print(executor)
+    async with db_pool.execute(executor) as cur:
+        await db_pool.commit()
+
+
+async def delete(table, task="", sqlcities=db_pool):
+    async with db_pool.execute(f"""DELETE FROM {table}{" WHERE " * (task != "") + task}""") as cur:
+        print(f"""DELETE FROM {table} WHERE {task}""")
+        await db_pool.commit()
 
 
 async def check(s, type="name", table="cities"):
     a = await get(table, f"{type} = '{s}'")
-    if a == []:
-        return False
-    return a[0] != []
+    return a != []
 
-# ================================================================
-# classes
-# ================================================================
+
 class City:
     forbidden_letters = "ЫЬЪЁ".lower()
     lvl1_letters = "КНГШЗХВАПРОЛДЖССМИТБ".lower()
@@ -76,14 +86,11 @@ class City:
             i -= 1
         self.ll = s[i]
 
-
     async def getr(self):
         return Region(self.rname)
 
     async def getC(self):
         return self.getr().getC()
-
-
 
     async def getca(self, used):
         arr = [i[0] for i in await get("cities", f"name LIKE '{self.ll.upper()}%'", "name") if i[0] not in used]
@@ -103,7 +110,7 @@ class City:
         }
         response = requests.get(search_api_server, params=search_params)
         json_response = response.json()
-        # print(json_response)
+        print(json_response)
         city = json_response["features"][0]
 
         point = city["geometry"]["coordinates"]
@@ -127,7 +134,7 @@ class City:
         pass
 
     def __eq__(self, city2):
-        return self.ll.lower() == city2[0].lower()
+        return self.ll == city2[0].lower()
 
 
 class Region:
@@ -159,19 +166,76 @@ class Country:
         return [await i.getcs() for i in self.getrs()]
 
 
-
-
-
 # ================================================================
 # game_funcs
 # ================================================================
+sep = "/"
+
+
 from random import choice as rchoice
+
+
+async def get_sess(id):
+    return (await get("users", f"uname = '{id}'"))[0]
+
+
+async def get_mp_sess(id):
+    return (await get("mp_sessions", f"sessid = '{id}'"))[0]
+
+
+async def create_new_sess(id, chat_id):
+    await insert_into("users", "uname, chatid, curmpid, status, wins", f"'{id}', {chat_id}, '/', 'ia', 0")
+
+
+async def create_new_mp_sess(id):
+    await insert_into("mp_sessions", "sessid, curtid", f"'{id}', 0")
+
+
+async def change_sess(id, params, values):
+    await set("users", f"uname = '{id}'", params, values)
+
+
+async def change_mp_sess(id, param, value, type="str"):
+    await set("mp_sessions", f"sessid = '{id}'", param, value, type=type)
+
+
+async def check_sess(id):
+    return id not in [i[0] for i in await get("users", inftype="uname")]
+
+
+async def check_mp_sess(id):
+    return id in [i[0] for i in await get("mp_sessions", inftype="sessid")]
+
+
+async def update_mp_sess(id):
+    lst1 = [i[0] for i in await get("users", f"curmpid = '{id}'", "uname")]
+    new_id = sep.join(lst1)
+    await set("mp_sessions", f"sessid = '{id}'", ["sessid"], [new_id])
+    await set("game_cities", f"sessid = '{id}'", ["sessid"], [new_id])
+    await set("users", f"curmpid = '{id}'", ["curmpid"], [new_id])
+    return new_id
+
+
+async def get_cities(id):
+    return [i[0] for i in await get("game_cities", f"sessid = '{id}'", "city")]
+
+
+async def add_city(name, id):
+    await insert_into("game_cities", "sessid, city", f"'{id}', '{name}'")
+
+
+async def get_chat_id(id):
+    return (await get("users", f"uname = '{id}'", "chatid"))[0][0]
+
+
+async def add_user_to_mp_sess(id, mp_id):
+    await set("users", f"uname = '{id}'", ["curmpid", "status"], [mp_id, "mp"])
 
 
 async def city_handler(cityname, used):
     flag = await check(cityname, "name", "cities")
     if not flag:
-        # print(11)
+        print(11)
         raise Exception
     city1 = City()
     await city1.init(cityname)
@@ -181,7 +245,14 @@ async def city_handler(cityname, used):
     return str(city2)
 
 
-
+async def city_info(update, context, city_name, is_hint=False):
+    print(city_name)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'https://ru.wikipedia.org/wiki/{city_name}') as response:
+            assert response.status == 200
+            soup = BeautifulSoup(await response.text(), 'lxml')
+            main_text = soup.find('p').text.strip()
+    await update.message.reply_text(main_text)
 
 # ================================================================
 
@@ -192,211 +263,204 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-sessions = {}
-with open('provinces.json', 'r', encoding='utf8') as file:
-    provinces = json.load(file)
+stmp, plmp, plsp, chmp, remp = range(5)
 
-class Session:
-    async def init(self, id, uname):
-        self.id = id
-        self.name = uname
-        self.game = []
-        self.in_game = False
-        self.timer = 10
 
-    async def new_game(self):
-        self.game = []
-        self.in_game = True
+# ================================================================
 
-    async def stop_game(self):
-        self.in_game = False
+# ================================================================
 
-    async def continue_game(self):
-        self.in_game = True
+button1 = KeyboardButton(text='/play_singleplayer_game')
+button2 = KeyboardButton(text='/play_multiplayer_game')
+button3 = KeyboardButton(text='/leaderboards')
+button4 = KeyboardButton(text='/rools')
+reply_keyboard = [[button1, button2], [button3], [button4]]
+start_markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
+del_markup = ReplyKeyboardRemove()
+reply_keyboard = [['/new_multiplayer_game'],
+                      ['/continue_multiplayer_game'],
+                      ]
+stmp_markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
 
-    async def update(self):
-        self.timer = 10
+
+# ================================================================
+
+# ================================================================
+rools = open("rools.txt", encoding="utf8", mode="r").read()
 
 
 def main():
-    application = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
-
+    application = Application.builder().token(BOT_TOKEN).build()
+    print('Starting Cities_Game chatbot')
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("new_game", new_game_command))
-    application.add_handler(CommandHandler("restart", new_game_command))
-    # application.add_handler(CommandHandler("leaderboards", leaderboards_command))
-    application.add_handler(CommandHandler("play", play))
-    application.add_handler(CommandHandler("stop", stop_game_command))
-    application.add_handler(CommandHandler("continue", continue_game_command))
+    application.add_handler(CommandHandler("cl", cl_bd))
+    #application.add_handler(CommandHandler("join_multiplayer_game", join_mp_game_command))
+    application.add_handler(CommandHandler("continue_multiplayer_game", continue_mp_game_command))
+    application.add_handler(CommandHandler("restart_singleplayer_game", new_sp_game_command))
+    application.add_handler(CommandHandler("leaderboards", leaderboards_command))
+    application.add_handler(CommandHandler("rools", rools_message))
+    application.add_handler(CommandHandler("play_singleplayer_game", play_sp))
+    application.add_handler(CommandHandler("play_multiplayer_game", play_mp))
+    mp_handler = ConversationHandler(
+        entry_points=[CommandHandler('new_multiplayer_game', new_mp_game_command),
+                      CommandHandler('load_multiplayer_game', load_mp_game_command),
+                      CommandHandler('join_multiplayer_game', join_mp_game_command)],
+        states={
+            stmp: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_mp)],
+            plmp: [MessageHandler(filters.TEXT & ~filters.COMMAND, mp_play)],
+        },
+        fallbacks=[CommandHandler('end_match', end_mp),
+                   CommandHandler('leave_match', leave_mp),
+                   CommandHandler('surrender', surrender_mp)],
+    )
+    sp_handler = ConversationHandler(
+        entry_points=[CommandHandler('new_singleplayer_game', new_sp_game_command),
+                      CommandHandler("continue_singleplayer_game", continue_sp_game_command)],
+        states={
+            plsp: [MessageHandler(filters.TEXT & ~filters.COMMAND, sp_play)],
+        },
+        fallbacks=[CommandHandler('stop', stop_game_command)],
+    )
+    application.add_handler(mp_handler)
+    application.add_handler(sp_handler)
     application.add_handler(CommandHandler("hint", hint_command))
+    application.add_handler(CommandHandler("cancel", cancel))
     # application.add_handler(CommandHandler("rools", rools_message))
 
-    text_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, message_processor)
-    application.add_handler(text_handler)
-    print('Starting Cities_Game chatbot')
-    # application.create_task(check_timers(application))
+    # text_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, message_processor)
+    # application.add_handler(text_handler)
+
     application.run_polling()
-    # await application.create_task(check_timers(application))
-
-
-def stop_timer(context, name):
-    global timer_range
-    timer_range = 20
-    timer = context.job_queue.get_jobs_by_name(str(name))
-    print(timer)
-    for i in timer:
-        i.schedule_removal()
-
-
-async def start_timer(context):
-    global timer_range
-    timer_range -= 1
-    sess = context.job.data['session']
-    await context.bot.send_message(context.job.chat_id, text=timer_range)
-
-    reply_keyboard = [[f"/restart"], ['/main_menu']]
-    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
-    if timer_range == 0:
-        await context.bot.send_message(context.job.chat_id, text='ТЫ ПРОИГРАЛ', reply_markup=markup)
-        sessions[context.job.chat_id].in_game = False
-        async with db_pool.execute(f'UPDATE users SET record = {len(sess)} WHERE id = {context.job.chat_id}') as cur:
-            await db_pool.commit()
 
 
 async def start(update, context):
-    """Отправляет сообщение когда получена команда /start"""
-    user = update.effective_user
-    sessions[update.message.chat_id] = Session()
-    await sessions[update.message.chat_id].init(update.message.chat_id, user)
-    is_logged_in = await check_user_if_logged_in(update.message.chat_id)
-    button1 = KeyboardButton(text='/play')
-    # button2 = KeyboardButton(text='/leaderboards')
-    reply_keyboard = [[button1]]
-    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
+    chat_id = update.message.chat_id
+    user = update.message.from_user.username
+    if await check_sess(user):
+        await create_new_sess(user, chat_id)
     await update.message.reply_html(
-        rf'Привет {user.mention_html()}! Я чат-бот для игры в города' + '\U0001F306', reply_markup=markup
+        rf'Привет {update.effective_user.mention_html()}! Я чат-бот для игры в города' + '\U0001F306', reply_markup=start_markup
     )
 
 
 async def back(update, context):
     await update.message.reply_text(
         "Меню закрыто",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=del_markup
     )
 
-timer_range = 20
-
+'''
 async def message_processor(update, context):
     chat_id = update.message.chat_id
-    if sessions[chat_id].in_game:
-        sess = sessions[chat_id]
-        s = update.message.text
-        # print(s)
-        print(f'sess.game - {sess.game}')
-        print(s)
-        # await update.message.reply_text("\U00002705")
 
-        # print(f'Ход - {sess.game}')
+    if chat_id in sessions and sessions[chat_id].in_game:
+        sess = sessions[chat_id]
+        s = await get_locality_name(update.message.text)
+        print(s)
+
+        # await update.message.reply_text("\U00002705")
         if (not sess.game or await City().init(sess.game[-1]) == s) and await check(s) and s not in sess.game:
-            stop_timer(context, str(chat_id))
             sess.game.append(s)
             res = await city_handler(s, sess.game)
             await city_info(update, context, f"{s}")
-            # print(res)
+            print(res)
             sess.game.append(res)
-            # print(sess.game)
+            print(sess.game)
             await update.message.reply_text(f"Мой ход: {res}")
             await city_info(update, context, f"{res}")
-            context.job_queue.run_repeating(start_timer, interval=1.0, first=0.0, data=({'session': sess.game}), chat_id=chat_id, name=str(chat_id))
-
         else:
-            city = City()
-            await city.init(sess.game[-1])
-            print(city, f'Последняя буква {city.ll}')
-            if sess.game and city != s:
+            if sess.game and await City().init(sess.game[-1]) != s:
                 await update.message.reply_text("Город начинается с неправильной буквы")
             elif not await check(s):
-                # s = await get_province_name(s)
-                # s = provinces[s]
+                s = await get_province_name(s)
                 if not await check(s):
                     await update.message.reply_text("Я не знаю такого города")
                 else:
                     await update.message.reply_text(f"Я не знаю такого города. Возможно вы имели ввиду {s}?")
-            elif s in sess.game:
-                await update.message.reply_text("Такой город уже был")
-            else:
-                stop_timer(context, str(chat_id))
-                sess.game.append(s)
-                res = await city_handler(s, sess.game)
-                await city_info(update, context, f"{s}")
-                # print(res)
-                sess.game.append(res)
-                # print(sess.game)
-                await update.message.reply_text(f"Мой ход: {res}")
-                await city_info(update, context, f"{res}")
-                context.job_queue.run_repeating(start_timer, interval=1.0, first=0.0, data=({'session': sess.game}), chat_id=chat_id, name=str(chat_id))
+            if s in sess.game:
+                await update.message.reply_text("Этот город уже был")
             # raise Exception()
+
+    elif chat_id in sessions and sessions[chat_id].in_mp_game:
+        mpgame = mp_sessions[sessions[chat_id].cur_mp_game_id]
+        if chat_id == mpgame["queue"][mpgame["turn"]]:
+            s = update.message.text
+            if (not mpgame["cities"] or await City().init(mpgame["cities"][-1]) == s) and await check(s) and s not in mpgame["cities"]:
+                mpgame["cities"].append(s)
+                for i in mpgame["queue"]:
+                    if i != chat_id:
+                        await context.bot.send_message(text=f"Ход {sessions[chat_id].name}: {s}", chat_id=i)
+                mpgame["turn"] = (mpgame["turn"] + 1) % len(mpgame["queue"])
+                await context.bot.send_message(text="Ваш ход:", chat_id=mpgame["queue"][mpgame["turn"]])
+            else:
+                if mpgame["cities"] and await City().init(mpgame["cities"][-1]) != s:
+                    await update.message.reply_text("Город начинается с неправильной буквы")
+                elif not await check(s):
+                    s = await get_province_name(s)
+                    if not await check(s):
+                        await update.message.reply_text("Я не знаю такого города")
+                    else:
+                        await update.message.reply_text(f"Я не знаю такого города. Возможно вы имели ввиду {s}?")
+                if s in mpgame["cities"]:
+                    await update.message.reply_text("Этот город уже был")
+                # raise Exception()
+        else:
+            await update.message.reply_text("Дождитесь своего хода!")
 
     else:
         # await error_message(update, context)
         await update.message.reply_text("Выберите команду из меню!")
     s = update.message.text
 
+'''
+
 
 async def city_info(update, context, city_name, is_hint=False):
-    print(city_name)
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f'https://ru.wikipedia.org/wiki/Город {city_name}') as response:
-            print(response.status)
-            soup = BeautifulSoup(await response.text(), 'lxml')
-            main_text = soup.find('p').text.strip()
-    await update.message.reply_text(main_text)
-    # print(f"Информация о городе {city_name}:")
-    # chat_id = update.message.chat_id
-    #
-    # city_images = []
-    # try:
-    #     wikipedia.set_lang("ru")
-    #     city_images = wikipedia.page(f"Город {city_name} достопримечательность").images
-    # except Exception as ex:
-    #     print(ex)
-    #     print(f"{city_name}: фото в википедии не найдено")
-    #     if is_hint:
-    #         await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
-    #
-    # if city_images:
-    #     city_image = city_images[0]
-    #
-    #     print(city_image)
-    #     try:
-    #         await context.bot.send_photo(chat_id=chat_id, photo=city_image)
-    #
-    #         if is_hint:
-    #             await update.message.reply_text("Попробуйте угадать это место!")
-    #         else:
-    #             await update.message.reply_text("Интересное о городе!")
-    #     except Exception as e:
-    #         print(f"{city_name}: фото не передано: {e}")
-    #         if is_hint:
-    #             await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
-    #
-    # if not is_hint:
-    #     try:
-    #         wikitext = wikipedia.summary(f"{city_name} Город", sentences=4)
-    #         print(wikitext)
-    #         await update.message.reply_text("Возможно, вы не знали:")
-    #         await update.message.reply_text(wikitext)
-    #     except Exception:
-    #         print(f"{city_name}: информация в википедии не найдена")
-    #
-    # if not is_hint:
-    #     try:
-    #         await save_map(city_name)
-    #         await context.bot.send_photo(chat_id=chat_id, photo='data/map.jpg')
-    #     except Exception:
-    #         print("Карта не найдена")
+    print(f"Информация о городе {city_name}:")
+    chat_id = update.message.chat_id
 
+    city_images = []
+    try:
+        wikipedia.set_lang("ru")
+        city_images = wikipedia.page(f"Город {city_name} достопримечательность").images
+    except Exception as ex:
+        print(ex)
+        print(f"{city_name}: фото в википедии не найдено")
+        if is_hint:
+            await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
+
+    if city_images:
+        city_image = city_images[0]
+
+        print(city_image)
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=city_image)
+
+            if is_hint:
+                await update.message.reply_text("Попробуйте угадать это место!")
+            else:
+                await update.message.reply_text("Интересное о городе!")
+        except Exception as e:
+            print(f"{city_name}: фото не передано: {e}")
+            if is_hint:
+                await update.message.reply_text("Попробуйте выбрать подсказку еще раз")
+
+    if not is_hint:
+        try:
+            wikitext = wikipedia.summary(f"{city_name} Город", sentences=4)
+            print(wikitext)
+            await update.message.reply_text("Возможно, вы не знали:")
+            await update.message.reply_text(wikitext)
+        except Exception:
+            print(f"{city_name}: информация в википедии не найдена")
+
+    if not is_hint:
+        try:
+            await save_map(city_name)
+            await context.bot.send_photo(chat_id=chat_id, photo='data/map.jpg')
+        except Exception:
+            print("Карта не найдена")
 
 
 async def get_locality_name(geocode):
@@ -405,7 +469,7 @@ async def get_locality_name(geocode):
     geocoder_request = f'{server_address}apikey={api_key}&geocode={geocode}&format=json'
     response = requests.get(geocoder_request).json()
     if response:
-        # print(response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name'])
+        print(response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name'])
         return response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty']['GeocoderMetaData']['Address']['Components'][-1]['name']
 
 
@@ -419,7 +483,6 @@ async def get_province_name(geocode):
             if response:
                 return response['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['metaDataProperty'][
                     'GeocoderMetaData']['Address']['Components'][-3]['name']
-
 
 
 async def save_map(city_name):
@@ -461,66 +524,372 @@ async def error_message(update, context):
     await update.message.reply_text("Произошла ошибка:( Мы уже пытаемся её устранить")
 
 
+async def timer_func(async_func, delay):
+    await asyncio.sleep(delay)
+    await async_func()
 
-async def play(update, context):
+
+async def play_sp(update, context):
     chat_id = update.message.chat_id
-    u = sessions[chat_id]
-    reply_keyboard = [[f'/{"new_game" * (u.game == []) + "restart" * (u.game != [])}'],
-                      ['/continue']
-                      # ['/new_multiplayer_game']
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    cities = await get_cities(user)
+    reply_keyboard = [[f'/{"new_singleplayer_game" * (cities == []) + "restart_singleplayer_game" * (cities != [])}'],
+                      ['/continue_singleplayer_game'],
                       ]
-    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
+    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
     user = update.effective_user
     await update.message.reply_html(
         rf"Хотите сыграть?", reply_markup=markup)
 
 
-async def leaderboards_command(update, context):
-    pass
-
-
-async def new_game_command(update, context):
+async def play_mp(update, context):
     chat_id = update.message.chat_id
-    u = sessions[chat_id]
-    await u.new_game()
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    cities = await get_cities(user)
+
     user = update.effective_user
-    reply_keyboard = [['/stop'], ['/hint'], ['/restart']
+    await update.message.reply_html(
+        rf"Хотите сыграть?", reply_markup=stmp_markup)
+
+
+async def start_mp(update, context):
+    chat_id = update.message.chat_id
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    s = update.message.text
+    if not await check_p_l(s):
+        await update.message.reply_text("Некорректный формат ввода!\nВведите ники игроков через пробел")
+        return stmp
+    else:
+        await update.message.reply_text("Отправляю запросы пользователям...")
+        lst = await check_p_l(s)
+        first_id = sep.join([user] + lst)
+        reply_keyboard = [[f'/join_multiplayer_game {first_id}'],
+                          [f'/cancel {first_id}'],
+                          ]
+        markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await add_user_to_mp_sess(user, first_id)
+        for i in lst:
+            if await check_sess(i):
+                await update.message.reply_text(f"{i} ещё не запускал бот")
+            elif i != user:
+                print(331)
+                chid = await get_chat_id(i)
+                await change_sess(i, ["status"], ["pending"])
+                await context.bot.send_message(
+                    text=f"{user} приглашает вас сыграть в игру. Хотите присоединиться?", chat_id=chid, reply_markup=markup)
+                print(332)
+        return plmp
+
+
+async def end_mp(update, context):
+    user = update.message.from_user.username
+    mp_sess_id = (await get_sess(user))[2]
+    if (await get_sess(user))[3] == "mp":
+        mp_sess_lst = list(mp_sess_id.split(sep))
+        reply_keyboard = [["/leave_match"]]
+        markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        for us in mp_sess_lst:
+            if us != user and (await get_sess(us))[3] == "mp":
+                await context.bot.send_message(text="Сессия остановлена. Инициализатор завершил сессию. Нажмите, чтобы выйти из сессии:",
+                                                chat_id=await get_chat_id(us), reply_markup=markup)
+            elif (await get_sess(us))[3] == "mp":
+                await context.bot.send_message(text="Сессия остановлена.",
+                                                chat_id=await get_chat_id(us), reply_markup=start_markup)
+    else:
+        await update.message.reply_text("Сессия остановлена")
+    await change_sess(user, ["status", "curmpid"], ["ia", ""])
+    return ConversationHandler.END
+
+
+async def leave_mp(update, context):
+    user = update.message.from_user.username
+    mp_sess_id = (await get_sess(user))[2]
+    if (await get_sess(user))[3] == "mp":
+        mp_sess_lst = list(mp_sess_id.split(sep))
+        reply_keyboard1 = [["/leave_match"]]
+        reply_keyboard2 = [["/end_match"]]
+        markup1 = ReplyKeyboardMarkup(reply_keyboard1, one_time_keyboard=True, resize_keyboard=True)
+        markup2 = ReplyKeyboardMarkup(reply_keyboard2, one_time_keyboard=True, resize_keyboard=True)
+        initer = mp_sess_lst[0]
+        for us in mp_sess_lst:
+            if us != user and us != initer and (await get_sess(us))[3] == "mp":
+                await context.bot.send_message(text=f"Сессия остановлена. @{user} вышел из игры. Нажмите, чтобы выйти из сессии:",
+                                                chat_id=await get_chat_id(us), reply_markup=markup1)
+            elif us == user and (await get_sess(us))[3] == "mp":
+                await context.bot.send_message(text=f"Сессия остановлена. Вы вышли из этой игры.",
+                                                chat_id=await get_chat_id(us), reply_markup=start_markup)
+            elif (await get_sess(us))[3] == "mp":
+                await context.bot.send_message(text=f"Сессия остановлена. @{user} вышел из игры. Нажмите, чтобы выйти из сессии:",
+                                                chat_id=await get_chat_id(us), reply_markup=markup2)
+    else:
+        await update.message.reply_text("Сессия остановлена")
+    await change_sess(user, ["status", "curmpid"], ["ia", ""])
+    return ConversationHandler.END
+
+
+async def surrender_mp(update, context):
+    user = update.message.from_user.username
+    sessid = (await get_sess(user))[2]
+    mp_sess_lst = list(sessid.split(sep))
+    await change_sess(user, ["status"], ["sd"])
+    stst = [i for i in mp_sess_lst if (await get_sess(i))[3] == "mp"]
+
+    if len(stst) > 1:
+        for us in mp_sess_lst:
+            if us != user:
+                await context.bot.send_message(text=f"@{user} сдал(ся/ась)", chat_id=await get_chat_id(us),
+                                               reply_markup=start_markup)
+        curtid = int((await get_mp_sess(sessid))[1])
+        n = len(mp_sess_lst)
+        while (await get_sess(mp_sess_lst[curtid]))[3] == "sd":
+            curtid = (curtid + 1) % n
+        await change_mp_sess(sessid, ["curtid"], [curtid], type="int")
+        await context.bot.send_message(text="Ваш ход:", chat_id=mp_sess_lst[curtid])
+    else:
+        initer = mp_sess_lst[0]
+        winner = stst[0]
+        reply_keyboard = [[f"/{'leave' * (winner != initer) + 'end' * (winner == initer)}_match"]]
+        markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await delete("mp_sessions", f"sessid = '{sessid}'")
+        await delete("game_cities", f"sessid = '{sessid}'")
+        for us in mp_sess_lst:
+            await change_sess(us, ["curmpid", "status"], ["", "ia"])
+            if us != winner and us != user:
+                await context.bot.send_message(
+                    text=f"@{user} сдал(ся/ась).\nИгра закончена!\n@{winner} объявляется победителем! \U0001F3C6",
+                    chat_id=await get_chat_id(us), reply_markup=start_markup)
+            elif us == user:
+                await context.bot.send_message(
+                    text=f"Игра закончена!\n@{winner} объявляется победителем! \U0001F3C6",
+                    chat_id=await get_chat_id(us), reply_markup=start_markup)
+            else:
+                await context.bot.send_message(
+                    text=f"Игра закончена!\nВы победили! \U0001F3C6\nНажмите, чтобы выйти из сессии:",
+                    chat_id=await get_chat_id(us), reply_markup=markup)
+        await change_sess(winner, ["wins"], [int((await get_sess(winner))[4]) + 1])
+    return ConversationHandler.END
+
+
+async def join_mp_game_command(update, context):
+    user = update.message.from_user.username
+    await add_user_to_mp_sess(user, context.args[0])
+    await update.message.reply_text(f"Вы присоединились к сессии {context.args[0]}")
+    print(1)
+    first_id = str(context.args[0])
+    lst = list(first_id.split(sep))
+    print(lst)
+    word = "загружена"
+    if not await check_pl(lst[1:]):
+        print(2)
+        if not await check_mp_sess(first_id):
+            word = "создана"
+            await create_new_mp_sess(first_id)
+        print(3)
+        await change_sess(user, ["curmpid"], [first_id])
+        print(4)
+        second_id = await update_mp_sess(first_id)
+        lst = list(second_id.split(sep))
+        print(lst)
+        print(5)
+        chid = await get_chat_id(lst[(await get_mp_sess(second_id))[1]])
+        reply_keyboard1 = [['/leave_match'], ["/surrender"]]
+        reply_keyboard2 = [['/end_match'], ["/surrender"]]
+        print(61)
+        listo = "\n".join([f"- @{i}" for i in lst])
+        print(listo)
+        mp_sess = await get_mp_sess((await get_sess(user))[2])
+        cities_listo = "\n".join([f"- {i}" for i in await get_cities(second_id)])
+        cities_str = ""
+        if cities_listo:
+            cities_str = f"\nНазванные города:\n{cities_listo}"
+        initer = lst[0]
+        for u in lst:
+            if u == initer:
+                markup = ReplyKeyboardMarkup(reply_keyboard2, one_time_keyboard=False, resize_keyboard=True)
+            else:
+                markup = ReplyKeyboardMarkup(reply_keyboard1, one_time_keyboard=False, resize_keyboard=True)
+            await context.bot.send_message(text=f"Сессия {word}. Игроки:\n{listo}{cities_str}",
+                                            chat_id=await get_chat_id(u), reply_markup=markup)
+        await context.bot.send_message(text="Ваш ход:", chat_id=chid)
+    else:
+        print(62)
+        # await context.bot.send_message(text="Сессия не создана.\nСлишком мало людей!", chat_id=chid)
+    return plmp
+
+
+async def continue_mp_game_command(update, context):
+    user = update.message.from_user.username
+    lst = await get("mp_sessions", inftype="sessid")
+    lst = [i[0] for i in lst if i[0].find(user) == 0]
+    reply_keyboard = [[f'/load_multiplayer_game {i}'] for i in lst] + [["/back"]]
+    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text("Выберите одну из ваших сохранённых сессий:", reply_markup=markup)
+
+
+async def load_mp_game_command(update, context):
+    print(111111111)
+    chat_id = update.message.chat_id
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    print(111111111)
+    await update.message.reply_text("Отправляю запросы пользователям...")
+    first_id = context.args[0]
+    lst = list(first_id.split(sep))
+    reply_keyboard = [[f'/join_multiplayer_game {first_id}'],
+                      [f'/cancel {first_id}'],
+                      ]
+    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+    fnllst = []
+    await add_user_to_mp_sess(user, first_id)
+    for i in lst:
+        if await check_sess(i):
+            await update.message.reply_text(f"{i} ещё не запускал бот")
+        elif i != user:
+            fnllst.append(i)
+            print(331)
+            chid = await get_chat_id(i)
+            await change_sess(i, ["status"], ["pending"])
+            await context.bot.send_message(
+                text=f"{user} приглашает вас сыграть в игру. Хотите присоединиться?", chat_id=chid, reply_markup=markup)
+            print(332)
+    return plmp
+
+
+async def sp_play(update, context):
+    chat_id = update.message.chat_id
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    cities = await get_cities(user)
+    # s = await get_locality_name(update.message.text)
+    s = update.message.text.lower().capitalize()
+    print(s)
+    print(cities)
+    # await update.message.reply_text("\U00002705")
+    if not cities or (await check(s) and await get_ll(cities[-1]) == s[0].lower() and s not in cities):
+        await add_city(s.lower().capitalize(), user)
+        res = await city_handler(s, cities)
+        await city_info(update, context, f"{s}")
+        print(res)
+        await add_city(res.lower().capitalize(), user)
+        print(cities)
+        await update.message.reply_text(f"Мой ход: {res}")
+        await city_info(update, context, f"{res}")
+    else:
+        if await get_ll(cities[-1]) != s[0].lower():
+            await update.message.reply_text("Город начинается с неправильной буквы!")
+        elif not await check(s):
+            s = await get_province_name(s)
+            await update.message.reply_text("Такого города нет в моей базе данных!")
+            if await check(s):
+                await update.message.reply_text(f"Возможно вы имели ввиду {s}?")
+        if s in cities:
+            await update.message.reply_text("Такой город уже был!")
+
+
+async def mp_play(update, context):
+    chat_id = update.message.chat_id
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    cities = await get_cities(u[2])
+    print(cities)
+    mpsess = await get_mp_sess(u[2])
+    print(f"USER: {user}")
+    queue = list(mpsess[0].split(sep))
+    req = update.message.text.lower().capitalize()
+    print(req)
+    if queue[int(mpsess[1])] == u[0]:
+        # if not cities or (await get_ll(cities[-1]) == req[0].lower() and req not in cities):
+        if not cities or (await check(req) and await get_ll(cities[-1]) == req[0].lower() and req not in cities):
+            await add_city(req.capitalize(), mpsess[0])
+            for i in queue:
+                if i != user:
+                    chid = await get_chat_id(i)
+                    await context.bot.send_message(text=f"Ход @{user}: {req.capitalize()}", chat_id=chid)
+            curtid = int(mpsess[1])
+            curtid = (curtid + 1) % (u[2].count(sep) + 1)
+            while (await get_sess(queue[curtid]))[3] == "sd":
+                curtid = (curtid + 1) % (u[2].count(sep) + 1)
+            await change_mp_sess(u[2], ["curtid"], [curtid], type="int")
+            await context.bot.send_message(text="Ваш ход:", chat_id=(await get_sess(queue[(await get_mp_sess(u[2]))[1]]))[1])
+            await update.message.reply_text("Зачтено\U00002714")
+        elif not await check(req):
+            await update.message.reply_text("Такого города нет в моей базе данных!")
+        elif get_ll(cities[-1]) != req[0].lower():
+            await update.message.reply_text("Город начинается с неправильной буквы!")
+        elif req in cities:
+            await update.message.reply_text("Такой город уже был!")
+    else:
+        await update.message.reply_text("Дождитесь своей очереди!")
+    return plmp
+
+
+async def leaderboards_command(update, context):
+    user = update.message.from_user.username
+    wins = (await get_sess(user))[4]
+    best = sorted([[i[0], int(i[1])] for i in await get("users", inftype="uname, wins")], key=lambda x: x[1], reverse=True)[:5]
+    medals = ["\U0001F947", "\U0001F948", "\U0001F949", "\U0001F3C5", "\U0001F3C5"]
+    numbers = ["I", "II", "III", "IV", "V"]
+    best_text = ""
+    for i in range(5):
+        if len(best) > i:
+            s = f"{medals[i]} {numbers[i]} место: @{best[i][0]} - {best[i][1]} побед;\n"
+        else:
+            s = f"{medals[i]} {numbers[i]} место: . . . . . . . . ;\n"
+        best_text += s
+    best_text += "< . . . . . . . . >\n"
+    total = [int(i[0]) for i in await get("users", inftype="wins")]
+    place = total.index(wins) + 1
+
+    text = f"Ваша статистика\U0001F4CA:\nТоп 5 игроков:\n\n{best_text}Вы находитесь на" \
+           f" {place}-м месте.\nВсего побед в многопользовательских матчах: {wins}"
+    await update.message.reply_text(text)
+
+
+async def new_sp_game_command(update, context):
+    chat_id = update.message.chat_id
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    await change_sess(user, ["status"], ["sp"])
+    user = update.effective_user
+    reply_keyboard = [['/stop']
                       ]
     markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
     await update.message.reply_html(
         rf"Ну что, {user.mention_html()}, начинайте!", reply_markup=markup)
+    return plsp
 
 
-async def continue_game_command(update, context):
-    chat_id = update.message.chat_id
-    u = sessions[chat_id]
-    if u.game:
-        u.continue_game()
+async def continue_sp_game_command(update, context):
+    user = update.message.from_user
+    u = await get_sess(user.username)
+    cities = await get_cities(user.username)
+    if cities:
+        await change_sess(user.username, ["status"], ["sp"])
         await update.message.reply_text("Загружаю города...")
+        await update.message.reply_text("\n".join(cities))
     else:
-        await u.new_game()
         await update.message.reply_text("Нет игры для продолжения...")
-
-    repl = "\n".join(u.game)
-    if repl:
-        await update.message.reply_text(repl)
-
-    user = update.effective_user
-    reply_keyboard = [['/stop'], ['/hint'], ['/restart']
+    reply_keyboard = [['/stop'], ['/hint']
                       ]
     markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
     await update.message.reply_html(
         rf"{user.mention_html()}, ваш ход:", reply_markup=markup)
+    return plsp
 
 
 async def hint_command(update, context):
     chat_id = update.message.chat_id
-    sess = sessions[chat_id]
-    if sess.game:
-        last_city = sess.game[-1]
-        # print(last_city)
+    user = update.message.from_user.username
+    sess = await get_sess(user)
+    cities = await get_cities(user)
+    if cities:
+        last_city = cities[-1]
+        print(last_city)
         try:
-            res = city_handler(sess.game[-1], sess.game)
+            res = city_handler(cities[-1], cities)
             await city_info(update, context, f"{res}", True)
         except Exception as e:
             print(f"{e}")
@@ -530,36 +899,111 @@ async def hint_command(update, context):
 
 async def stop_game_command(update, context):
     chat_id = update.message.chat_id
-    u = sessions[chat_id]
-    u.stop_game()
-    # user = update.effective_user
-    button1 = KeyboardButton(text='/play')
-    button2 = KeyboardButton(text='/leaderboards')
-    reply_keyboard = [[button1]]
-    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    await change_sess(user, ["status"], ["ia"])
     await update.message.reply_html(
-        rf"Текущая игра завершена", reply_markup=markup)
+        rf"Текущая игра приостановлена", reply_markup=start_markup)
+    return ConversationHandler.END
+
+
+async def new_mp_game_command(update, context):
+    chat_id = update.message.chat_id
+    user = update.message.from_user.username
+    u = await get_sess(user)
+    await change_sess(user, ["status"], ["mp"])
+    await update.message.reply_text("Отправьте ники игроков через пробел:")
+    return stmp
+
+
+async def cancel(update, context):
+    user = update.message.from_user
+    logger.info("Пользователь %s отменил разговор.", user.first_name)
+    await change_sess(user.username, ["status", "curmpid"], ["ia", ""])
+    await update.message.reply_text(
+        text="Вы отказались от присоединения к игре",
+        reply_markup=del_markup
+    )
+    user = user.username
+    print(1)
+    first_id = str(context.args[0])
+    lst = list(first_id.split(sep))
+    print(lst)
+    word = "загружена"
+    if not await check_pl(lst[1:]):
+        print(2)
+        if not await check_mp_sess(first_id):
+            word = "создана"
+            await create_new_mp_sess(first_id)
+        print(4)
+        second_id = await update_mp_sess(first_id)
+        lst = list(second_id.split(sep))
+        print(lst)
+        print(5)
+        chid = await get_chat_id(lst[(await get_mp_sess(second_id))[1]])
+        reply_keyboard1 = [['/leave_match'], ["/surrender"]]
+        reply_keyboard2 = [['/end_match'], ["/surrender"]]
+        print(61)
+        listo = "\n".join([f"- @{i}" for i in lst])
+        print(listo)
+        cities_listo = "\n".join([f"- {i}" for i in await get_cities(second_id)])
+        cities_str = ""
+        if cities_listo:
+            cities_str = f"\nНазванные города:\n{cities_listo}"
+        initer = lst[0]
+        for u in lst:
+            if u == initer:
+                markup = ReplyKeyboardMarkup(reply_keyboard2, one_time_keyboard=False, resize_keyboard=True)
+            else:
+                markup = ReplyKeyboardMarkup(reply_keyboard1, one_time_keyboard=False, resize_keyboard=True)
+            await context.bot.send_message(text=f"Сессия {word}. Игроки:\n{listo}{cities_str}",
+                                            chat_id=await get_chat_id(u), reply_markup=markup)
+        await context.bot.send_message(text="Ваш ход:", chat_id=chid)
+    else:
+        print(62)
+        # await context.bot.send_message(text="Сессия не создана.\nСлишком мало людей!", chat_id=chid)
+
+
+async def check_p_l(s):
+    print(f"Проверяю '{s}'")
+    s = s.strip(" ")
+    s = list(s.split())
+    ans = []
+    if all(i[0] == "@" for i in s):
+        ans = [i[1:] for i in s]
+    print(ans)
+    return ans
+
+
+async def check_pl(lst):
+    # lst = [(await get_sess(username))[3] for username in lst if await check_sess(username)]
+    lst = [(await get_sess(username))[3] for username in lst]
+    lst2 = [i == "pending" for i in lst]
+    ans = sum(lst2) != 0
+    print("Проверяю список:", lst, ans)
+    return ans
 
 
 async def rools_message(update, context):
-    update.message.reply_text("""Правила игры:
-    ...
-    """)
+    await update.message.reply_text(rools)
 
-async def check_user_if_logged_in(user_id):
-    user = await get('users', f'id = {user_id}')
-    if user != []:
-        return True
-    else:
-        async with db_pool.execute(f"""INSERT INTO users VALUES({user_id}, 'offline')"""):
-            await db_pool.commit()
-        return False
+
+async def cl_bd(update, context):
+    await delete("mp_sessions")
+    await delete("game_cities")
+    await set("users", "uname = uname", inftypes=["curmpid", "status"], values=["None", "ia"])
+    await update.message.reply_text("Database cleared!")
+
+
+async def get_ll(s):
+    forbidden_letters = "ЫЬЪЁ".lower()
+    i = -1
+    while s[i].lower() in forbidden_letters and s[i].isalpha():
+        i -= 1
+    return s[i].lower()
 
 
 if __name__ == '__main__':
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     main()
-
-
-
