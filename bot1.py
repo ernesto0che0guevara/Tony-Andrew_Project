@@ -302,7 +302,6 @@ def main():
     application.add_handler(CommandHandler("cl", cl_bd))
     #application.add_handler(CommandHandler("join_multiplayer_game", join_mp_game_command))
     application.add_handler(CommandHandler("continue_multiplayer_game", continue_mp_game_command))
-    application.add_handler(CommandHandler("restart_singleplayer_game", new_sp_game_command))
     application.add_handler(CommandHandler("leaderboards", leaderboards_command))
     application.add_handler(CommandHandler("rules", rules_message))
     application.add_handler(CommandHandler("play_singleplayer_game", play_sp))
@@ -321,6 +320,7 @@ def main():
     )
     sp_handler = ConversationHandler(
         entry_points=[CommandHandler('new_singleplayer_game', new_sp_game_command),
+                      CommandHandler('restart_singleplayer_game', new_sp_game_command),
                       CommandHandler("continue_singleplayer_game", continue_sp_game_command)],
         states={
             plsp: [MessageHandler(filters.TEXT & ~filters.COMMAND, sp_play)],
@@ -515,6 +515,8 @@ async def save_map(city_name):
         "apikey": apikey,
         "pt": "{0},pm2dgl".format(city_point)
     }
+
+    print('map_params', map_params)
 
     map_api_server = "https://static-maps.yandex.ru/v1"
     response = requests.get(map_api_server, params=map_params)
@@ -774,6 +776,7 @@ async def sp_play(update, context):
     print(cities)
     # await update.message.reply_text("\U00002705")
     if not cities or (await check(s) and await get_ll(cities[-1]) == s[0].lower() and s not in cities):
+        await update.message.reply_text("Зачтено\U00002714")
         await add_city(s.lower().capitalize(), user)
         res = await city_handler(s, cities)
         await city_info(update, context, f"{s}")
@@ -786,10 +789,10 @@ async def sp_play(update, context):
         if await get_ll(cities[-1]) != s[0].lower():
             await update.message.reply_text("Город начинается с неправильной буквы!")
         elif not await check(s):
-            s = await get_province_name(s)
+            # s = await get_province_name(s)
             await update.message.reply_text("Такого города нет в моей базе данных!")
-            if await check(s):
-                await update.message.reply_text(f"Возможно вы имели ввиду {s}?")
+            # if await check(s):
+                # await update.message.reply_text(f"Возможно вы имели ввиду {s}?")
         if s in cities:
             await update.message.reply_text("Такой город уже был!")
 
@@ -858,6 +861,7 @@ async def new_sp_game_command(update, context):
     user = update.message.from_user.username
     u = await get_sess(user)
     await change_sess(user, ["status"], ["sp"])
+    await delete("game_cities", f"sessid = '{user}'")
     user = update.effective_user
     reply_keyboard = [['/stop']
                       ]
