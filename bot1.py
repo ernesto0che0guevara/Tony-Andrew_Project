@@ -216,6 +216,11 @@ async def update_mp_sess(id):
     return new_id
 
 
+async def get_act_players(sessid):
+    lst1 = [i[0] for i in await get("users", f"curmpid = '{id}'", "uname")]
+    return lst1
+
+
 async def get_cities(id):
     return [i[0] for i in await get("game_cities", f"sessid = '{id}'", "city")]
 
@@ -273,7 +278,7 @@ stmp, plmp, plsp, chmp, remp = range(5)
 button1 = KeyboardButton(text='/play_singleplayer_game')
 button2 = KeyboardButton(text='/play_multiplayer_game')
 button3 = KeyboardButton(text='/leaderboards')
-button4 = KeyboardButton(text='/rools')
+button4 = KeyboardButton(text='/rules')
 reply_keyboard = [[button1, button2], [button3], [button4]]
 start_markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
 del_markup = ReplyKeyboardRemove()
@@ -286,7 +291,7 @@ stmp_markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resiz
 # ================================================================
 
 # ================================================================
-rools = open("rools.txt", encoding="utf8", mode="r").read()
+rules = open("rules.txt", encoding="utf8", mode="r").read()
 
 
 def main():
@@ -299,7 +304,7 @@ def main():
     application.add_handler(CommandHandler("continue_multiplayer_game", continue_mp_game_command))
     application.add_handler(CommandHandler("restart_singleplayer_game", new_sp_game_command))
     application.add_handler(CommandHandler("leaderboards", leaderboards_command))
-    application.add_handler(CommandHandler("rools", rools_message))
+    application.add_handler(CommandHandler("rules", rules_message))
     application.add_handler(CommandHandler("play_singleplayer_game", play_sp))
     application.add_handler(CommandHandler("play_multiplayer_game", play_mp))
     mp_handler = ConversationHandler(
@@ -326,7 +331,7 @@ def main():
     application.add_handler(sp_handler)
     application.add_handler(CommandHandler("hint", hint_command))
     application.add_handler(CommandHandler("cancel", cancel))
-    # application.add_handler(CommandHandler("rools", rools_message))
+    # application.add_handler(CommandHandler("rules", rules_message))
 
     # text_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, message_processor)
     # application.add_handler(text_handler)
@@ -928,9 +933,10 @@ async def cancel(update, context):
     print(1)
     first_id = str(context.args[0])
     lst = list(first_id.split(sep))
+    initer = lst[0]
     print(lst)
     word = "загружена"
-    if not await check_pl(lst[1:]):
+    if len(await get_act_players(first_id)) > 1:
         print(2)
         if not await check_mp_sess(first_id):
             word = "создана"
@@ -960,8 +966,11 @@ async def cancel(update, context):
                                             chat_id=await get_chat_id(u), reply_markup=markup)
         await context.bot.send_message(text="Ваш ход:", chat_id=chid)
     else:
+        reply_keyboard = [["/end_match"]]
         print(62)
-        # await context.bot.send_message(text="Сессия не создана.\nСлишком мало людей!", chat_id=chid)
+        markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await context.bot.send_message(text="Сессия не создана.\nСлишком мало людей!\nНажмите, чтобы выйти из сессии:",
+                                       chat_id=await get_chat_id(initer), reply_markup=markup)
 
 
 async def check_p_l(s):
@@ -984,8 +993,8 @@ async def check_pl(lst):
     return ans
 
 
-async def rools_message(update, context):
-    await update.message.reply_text(rools)
+async def rules_message(update, context):
+    await update.message.reply_text(rules)
 
 
 async def cl_bd(update, context):
