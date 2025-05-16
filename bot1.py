@@ -428,7 +428,7 @@ async def city_info(update, context, city_name, is_hint=False):
     city_images = []
     try:
         wikipedia.set_lang("ru")
-        city_images = wikipedia.page(f"Город {city_name} достопримечательность").images
+        city_images = wikipedia.page(f"Город {city_name}").images
     except Exception as ex:
         print(ex)
         print(f"{city_name}: фото в википедии не найдено")
@@ -499,10 +499,12 @@ async def save_map(city_name):
         "lang": "ru_RU",
         "type": "geo"
     }
+    print('map_params', search_params)
+
     async with aiohttp.ClientSession() as session:
-        async with session.get(search_api_server) as response:
+        async with session.get(search_api_server, params=search_params) as response:
             json_response = await response.json()
-    # print(json_response)
+
     city = json_response["features"][0]
 
     point = city["geometry"]["coordinates"]
@@ -515,8 +517,6 @@ async def save_map(city_name):
         "apikey": apikey,
         "pt": "{0},pm2dgl".format(city_point)
     }
-
-    print('map_params', map_params)
 
     map_api_server = "https://static-maps.yandex.ru/v1"
     response = requests.get(map_api_server, params=map_params)
